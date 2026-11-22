@@ -296,6 +296,19 @@ async function decideExit(rid, uid, ok) {
   if (ok) await updateDoc(doc(db, 'rooms', rid), { members: arrayRemove(uid) });
   toast(ok ? 'Exit approved' : 'Exit denied');
 }
+async function deleteRoom(rid) {
+  const r = st.rooms.find(x => x.id === rid);
+  if (!r || r.creator !== me()) return toast('Only the creator can delete the room');
+  if (sharesOf(rid).some(x => x.status !== 'confirmed')) return toast('Some payments are still pending. Settle them first (the payer can Accept or tap “Got cash”), then delete.');
+  await Promise.all(r.members.filter(m => m !== me()).map(m => notify(m, rid, 'room_deleted', `🗑 The room "${r.name}" was deleted by its creator.`)));
+  const b = writeBatch(db);
+  sharesOf(rid).forEach(x => b.delete(doc(db, 'rooms', rid, 'shares', x.id)));
+  (st.bills[rid] || []).forEach(x => b.delete(doc(db, 'rooms', rid, 'bills', x.id)));
+  (st.exits[rid] || []).forEach(x => b.delete(doc(db, 'rooms', rid, 'exits', x.id)));
+  b.delete(doc(db, 'rooms', rid));
+  await b.commit();
+  ui.modal = null; ui.room = null; toast('Room deleted');
+}
 async function saveProfile() {
   const upi = (D.myupi ?? st.profile.upi ?? '').trim(), name = (D.myname ?? st.profile.name).trim();
   if (!name) return toast('Enter your name');
@@ -396,7 +409,7 @@ function roomView(r) {
   ${reqs.map(e => `<div class="card" style="border-color:var(--warn)"><b>${esc(nm(e.id))}</b> wants to leave the room.<div class="row" style="margin-top:8px"><button class="ok sm" data-a="exitok" data-r="${r.id}" data-u="${e.id}">Approve</button><button class="bd sm" data-a="exitno" data-r="${r.id}" data-u="${e.id}">Deny</button></div></div>`).join('')}
   ${bills.length ? bills.map(b => billCard(r, b)).join('') : '<div class="empty">No bills yet.<br>Start with “+ Add Bill”.</div>'}
   <div class="card"><div class="mut">Added by mistake? Leaving the room needs the creator’s confirmation.</div>
-  ${isC ? '<div class="mut" style="margin-top:6px">You are the creator of this room 👑</div>' : myReq ? '<div class="warn" style="margin-top:6px">⏳ Exit request is waiting for the creator’s approval</div>' : `<button class="ghost full" style="margin-top:8px" data-a="reqexit" data-r="${r.id}">🚪 Leave room (needs creator approval)</button>`}</div>`;
+  ${isC ? `<div class="mut" style="margin-top:6px">You are the creator of this room 👑</div><button class="bd full" style="margin-top:8px" data-a="modal" data-x="delroom" data-r="${r.id}">🗑 Delete room</button>` : myReq ? '<div class="warn" style="margin-top:6px">⏳ Exit request is waiting for the creator’s approval</div>' : `<button class="ghost full" style="margin-top:8px" data-a="reqexit" data-r="${r.id}">🚪 Leave room (needs creator approval)</button>`}</div>`;
 }
 function billCard(r, b) {
   const isPayer = b.payer === me(), shares = sharesOf(r.id).filter(s => s.billId === b.id);
@@ -491,6 +504,9 @@ function modalView() {
     <div class="mut" style="margin:8px 0">“Show all UPI apps” lets your phone list every UPI app you have installed. Or scan the QR with any app. After paying, tap below.</div>
     <button class="ok full" data-a="claim" data-r="${m.r}" data-s="${m.s}">✔ I have paid</button>`
       : `<div class="demo">${esc(nm(s.payer))} has not added a UPI ID yet. Pay them directly, then tap “I have paid”.</div><button class="ok full" data-a="claim" data-r="${m.r}" data-s="${m.s}">✔ I have paid</button>`}`;
+  } else if (m.t === 'delroom') {
+    const r = st.rooms.find(x => x.id === ui.room); if (!r) return '';
+    h = `<h3>Delete “${esc(r.name)}”?</h3><p class="mut">This removes the room, all its bills and history for everyone. It cannot be undone. A room can only be deleted when no payment is pending.</p><button class="bd full" data-a="delroomgo" data-r="${r.id}">Yes, delete room</button>`;
   } else if (m.t === 'password') {
     h = `<h3>Change password</h3><label>New password</label>${inp('newpw', '••••••', 'password')}<label>Confirm new password</label>${inp('newpw2', '••••••', 'password')}<button class="full" data-a="changepw">Save password</button>`;
   } else if (m.t === 'share') {
@@ -560,6 +576,7 @@ document.addEventListener('click', e => {
     case 'acceptfr': return run(async () => { await updateDoc(doc(db, 'friendships', f), { status: 'accepted' }); toast('Friend added ✅'); });
     case 'declinefr': return run(async () => { const fr = st.friendships.find(q => q.id === f); await deleteDoc(doc(db, 'friendships', f)); toast(fr && fr.requester === me() ? 'Request cancelled' : 'Request declined'); });
     case 'createroom': return run(createRoom);
+    case 'delroomgo': return run(() => deleteRoom(r));
     case 'addmembers': return run(addMembers);
     case 'addbill': return run(addBill);
     case 'claim': return run(() => claimPaid(r, s));
