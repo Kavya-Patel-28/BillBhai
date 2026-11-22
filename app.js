@@ -1,11 +1,12 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import {
   getAuth, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult,
-  createUserWithEmailAndPassword, signInWithEmailAndPassword, updatePassword, signOut
+  createUserWithEmailAndPassword, signInWithEmailAndPassword, updatePassword, signOut,
+  deleteUser, reauthenticateWithCredential, reauthenticateWithPopup, EmailAuthProvider
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
 import {
   getFirestore, doc, getDoc, setDoc, updateDoc, addDoc, collection, query, where, orderBy, limit,
-  onSnapshot, writeBatch, serverTimestamp, arrayUnion, arrayRemove, deleteDoc
+  onSnapshot, writeBatch, serverTimestamp, arrayUnion, arrayRemove, deleteDoc, getDocs
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
 import { getMessaging, getToken, isSupported } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging.js';
 
@@ -36,7 +37,7 @@ const st = {
   friendships: [], rooms: [], roomsLoaded: false,
   bills: {}, shares: {}, exits: {}, inbox: [], users: {}
 };
-const ui = { tab: 'rooms', sub: 'pending', room: null, modal: null, mode: 'welcome', emode: 'login', toast: '', fmsg: '', busy: false, };
+const ui = { tab: 'rooms', sub: 'pending', room: null, modal: null, mode: 'welcome', emode: 'login', toast: '', fmsg: '', busy: false, deleting: false, };
 let D = {};
 let subs = [], roomSubs = {}, askedUsers = new Set(), toastT, deferredInstall = null;
 
@@ -133,7 +134,7 @@ function syncRooms() {
 function needUsers(ids) {
   ids.filter(i => i && !st.users[i] && !askedUsers.has(i)).forEach(i => {
     askedUsers.add(i);
-    getDoc(doc(db, 'users', i)).then(s => { if (s.exists()) { st.users[i] = { id: i, ...s.data() }; render(); } }).catch(() => askedUsers.delete(i));
+    getDoc(doc(db, 'users', i)).then(s => { st.users[i] = s.exists() ? { id: i, ...s.data() } : { id: i, name: 'Deleted user', username: '', upi: '' }; render(); }).catch(() => askedUsers.delete(i));
   });
 }
 async function notify(to, roomId, type, text) {
@@ -309,6 +310,38 @@ async function deleteRoom(rid) {
   await b.commit();
   ui.modal = null; ui.room = null; toast('Room deleted');
 }
+async function deleteAccount() {
+  const uid = me(), user = auth.currentUser, p = st.profile;
+  if ((D.delconfirm || '').trim() !== 'DELETE') return toast('Type DELETE to confirm');
+  if (st.rooms.some(r => hasOpen(r, uid))) return toast('Some payments are still pending. Settle all payments first, then delete your account.');
+  const mine = st.rooms.filter(r => r.creator === uid);
+  if (mine.length) return toast(`You created ${mine.length} room(s). Delete them first (open the room → Delete room).`);
+  const isMobile = (user.email || '').endsWith(MOBILE_DOMAIN);
+  if (isMobile) {
+    if (!D.delpw) return toast('Enter your password to confirm');
+    await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, D.delpw));
+  } else await reauthenticateWithPopup(user, new GoogleAuthProvider());
+  ui.deleting = true; render();
+  try {
+    const mobile = (st.priv || {}).mobile, others = st.rooms.filter(r => r.creator !== uid), fr = st.friendships.slice();
+    const [inb, toks] = await Promise.all([getDocs(collection(db, 'users', uid, 'inbox')), getDocs(collection(db, 'users', uid, 'tokens'))]);
+    subs.forEach(f => f()); subs = [];
+    Object.values(roomSubs).forEach(a => a.forEach(f => f())); roomSubs = {};
+    for (const r of others) await updateDoc(doc(db, 'rooms', r.id), { members: arrayRemove(uid) });
+    const refs = [...fr.map(f => doc(db, 'friendships', f.id)), ...inb.docs.map(d => d.ref), ...toks.docs.map(d => d.ref)];
+    for (let i = 0; i < refs.length; i += 400) { const b = writeBatch(db); refs.slice(i, i + 400).forEach(r => b.delete(r)); await b.commit(); }
+    const b = writeBatch(db);
+    b.delete(doc(db, 'users', uid, 'private', 'me'));
+    b.delete(doc(db, 'usernames', p.usernameLower));
+    if (mobile) b.delete(doc(db, 'phones', mobile));
+    b.delete(doc(db, 'users', uid));
+    await b.commit();
+    await deleteUser(user);
+    ui.modal = null; ui.tab = 'rooms'; ui.room = null; ui.mode = 'welcome'; D = {};
+    toast('Account deleted. You can sign up again anytime.');
+  } catch (e) { if (auth.currentUser) startSession(auth.currentUser); throw e; }
+  finally { ui.deleting = false; }
+}
 async function saveProfile() {
   const upi = (D.myupi ?? st.profile.upi ?? '').trim(), name = (D.myname ?? st.profile.name).trim();
   if (!name) return toast('Enter your name');
@@ -468,7 +501,8 @@ function profileTab() {
   <div><label>🌗 Display mode</label><div class="tabs" style="margin:4px 0 0">${[['auto', '🌓 Auto'], ['light', '☀️ Light'], ['dark', '🌙 Dark']].map(m => `<button class="${mode === m[0] ? '' : 'sec'}" data-a="dmode" data-x="${m[0]}">${m[1]}</button>`).join('')}</div></div>
   <div><label>🎨 Colour theme</label><div class="themes">${THEMES.map(t => `<button class="${theme === t[0] ? 'on' : ''}" data-a="theme" data-x="${t[0]}" title="${t[1]}" style="background:linear-gradient(135deg,${t[2]},${t[3]})"></button>`).join('')}</div></div>
   <button class="sec full" data-a="modal" data-x="share">📤 Share app</button>
-  <button class="ghost full" data-a="logout">Log out</button></div>`;
+  <button class="ghost full" data-a="logout">Log out</button>
+  <button class="ghost full bad" data-a="modal" data-x="delacct">🗑 Delete my account</button></div>`;
 }
 function inviteText() {
   const link = `${location.origin}${location.pathname}?u=${st.profile.username}`;
@@ -504,6 +538,13 @@ function modalView() {
     <div class="mut" style="margin:8px 0">“Show all UPI apps” lets your phone list every UPI app you have installed. Or scan the QR with any app. After paying, tap below.</div>
     <button class="ok full" data-a="claim" data-r="${m.r}" data-s="${m.s}">✔ I have paid</button>`
       : `<div class="demo">${esc(nm(s.payer))} has not added a UPI ID yet. Pay them directly, then tap “I have paid”.</div><button class="ok full" data-a="claim" data-r="${m.r}" data-s="${m.s}">✔ I have paid</button>`}`;
+  } else if (m.t === 'delacct') {
+    const mobileAcc = (st.user.email || '').endsWith(MOBILE_DOMAIN);
+    h = `<h3>Delete your account?</h3><p class="mut">Your profile, friends and notifications will be removed and you will leave your rooms. Your username and mobile number become free, so you can sign up again with the same number. This cannot be undone.</p>
+    <p class="mut">You can delete your account only when no payment is pending and you have no rooms you created (delete those first).</p>
+    ${mobileAcc ? `<label>Password</label>${inp('delpw', '••••••', 'password')}` : '<div class="note">You will be asked to sign in with Google again to confirm.</div>'}
+    <label>Type DELETE to confirm</label>${inp('delconfirm', 'DELETE', 'text', 'autocapitalize="characters"')}
+    <button class="bd full" data-a="delacctgo">Delete my account</button>`;
   } else if (m.t === 'delroom') {
     const r = st.rooms.find(x => x.id === ui.room); if (!r) return '';
     h = `<h3>Delete “${esc(r.name)}”?</h3><p class="mut">This removes the room, all its bills and history for everyone. It cannot be undone. A room can only be deleted when no payment is pending.</p><button class="bd full" data-a="delroomgo" data-r="${r.id}">Yes, delete room</button>`;
@@ -528,18 +569,38 @@ function appView() {
   <nav><div>${tb('rooms', '🏠', 'Rooms')}${tb('friends', '👥', 'Friends')}${tb('alerts', '🔔', 'Alerts', un || '')}${tb('me', '👤', 'Profile')}</div></nav>`;
 }
 
+/* Back button: Android/browser back goes one level up instead of leaving the app */
+let histDepth = 0, skipPops = 0;
+const navDepth = () => st.user ? ((ui.tab !== 'rooms' ? 1 : 0) + (ui.room ? 1 : 0) + (ui.modal ? 1 : 0)) : (ui.mode === 'mobile' ? 1 : 0);
+function syncHistory() {
+  const d = navDepth();
+  while (histDepth < d) { try { history.pushState({ bb: histDepth + 1 }, ''); } catch (e) { break; } histDepth++; }
+  if (histDepth > d) { const n = histDepth - d; skipPops++; histDepth = d; try { history.go(-n); } catch (e) { skipPops--; } }
+}
+window.addEventListener('popstate', () => {
+  if (skipPops > 0) { skipPops--; return; }
+  histDepth = Math.max(0, histDepth - 1);
+  if (!st.user) { if (ui.mode === 'mobile') ui.mode = 'welcome'; }
+  else if (ui.modal) ui.modal = null;
+  else if (ui.room) ui.room = null;
+  else if (ui.tab !== 'rooms') ui.tab = 'rooms';
+  render();
+});
+
 function render() {
+  syncHistory();
   const de = document.documentElement, theme = lsGet('bb_theme', 'purple'), mode = lsGet('bb_mode', 'auto');
   de.dataset.theme = theme;
   de.dataset.mode = (mode === 'dark' || (mode === 'auto' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches)) ? 'dark' : 'light';
   const act = document.activeElement, key = act && act.dataset ? act.dataset.k : null;
   let body;
   if (!configured) body = setupView();
+  else if (ui.deleting) body = '<div class="empty" style="padding-top:30vh">Deleting your account…</div>';
   else if (!st.authReady || (st.user && !st.profLoaded)) body = '<div class="empty" style="padding-top:30vh">Loading…</div>';
   else if (!st.user) body = authView();
   else if (!st.profile) body = onboardingView();
   else body = appView();
-  $app.innerHTML = `<div class="${ui.busy ? 'spin' : ''}">${body}</div>` + (st.profile ? modalView() : '') + (ui.toast ? `<div class="toast">${esc(ui.toast)}</div>` : '');
+  $app.innerHTML = `<div class="${ui.busy ? 'spin' : ''}">${body}</div>` + (st.profile && !ui.deleting ? modalView() : '') + (ui.toast ? `<div class="toast">${esc(ui.toast)}</div>` : '');
   if (ui.modal && ui.modal.t === 'pay') {
     try {
       const s = findShare(ui.modal.r, ui.modal.s), p = s && U(s.payer), el = document.getElementById('qr');
@@ -577,6 +638,7 @@ document.addEventListener('click', e => {
     case 'declinefr': return run(async () => { const fr = st.friendships.find(q => q.id === f); await deleteDoc(doc(db, 'friendships', f)); toast(fr && fr.requester === me() ? 'Request cancelled' : 'Request declined'); });
     case 'createroom': return run(createRoom);
     case 'delroomgo': return run(() => deleteRoom(r));
+    case 'delacctgo': return run(deleteAccount);
     case 'addmembers': return run(addMembers);
     case 'addbill': return run(addBill);
     case 'claim': return run(() => claimPaid(r, s));
