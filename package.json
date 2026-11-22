@@ -1,0 +1,8 @@
+{
+  "name": "billbhai",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": { "remind": "node scripts/reminders.js" },
+  "dependencies": { "firebase-admin": "^12.7.0" },
+  "engines": { "node": ">=18" }
+}
