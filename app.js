@@ -37,7 +37,7 @@ const st = {
   friendships: [], rooms: [], roomsLoaded: false,
   bills: {}, shares: {}, exits: {}, inbox: [], users: {}
 };
-const ui = { tab: 'rooms', sub: 'pending', room: null, modal: null, mode: 'welcome', emode: 'login', toast: '', fmsg: '', busy: false, deleting: false, };
+const ui = { tab: 'rooms', sub: 'pending', room: null, modal: null, mode: 'welcome', emode: 'login', toast: '', fmsg: '', busy: false, deleting: false, friend: null, };
 let D = {};
 let subs = [], roomSubs = {}, askedUsers = new Set(), toastT, deferredInstall = null;
 
@@ -279,6 +279,15 @@ async function remindInApp(rid, sid) {
   await notify(s.debtor, rid, 'reminder', `⏰ ${st.profile.name} is reminding you: ${rs(s.amt)} is pending ("${s.title}" – ${r.name}).`);
   ui.modal = null; toast('Reminder sent 🔔');
 }
+async function remindFriendRoom(rid, fid) {
+  const r = st.rooms.find(x => x.id === rid);
+  const list = sharesOf(rid).filter(x => x.payer === me() && x.debtor === fid && x.status === 'pending');
+  if (!r || !list.length) return;
+  await Promise.all(list.map(x => updateDoc(shareRef(rid, x.id), { lastRemind: serverTimestamp() })));
+  const tot = list.reduce((a, x) => a + x.amt, 0);
+  await notify(fid, rid, 'reminder', `⏰ ${st.profile.name} is reminding you: you owe ${rs(tot)} in "${r.name}".`);
+  toast('Reminder sent 🔔');
+}
 async function reqExit(rid) {
   const r = st.rooms.find(x => x.id === rid);
   if (r.creator === me()) return toast('The creator cannot leave the room');
@@ -337,7 +346,7 @@ async function deleteAccount() {
     b.delete(doc(db, 'users', uid));
     await b.commit();
     await deleteUser(user);
-    ui.modal = null; ui.tab = 'rooms'; ui.room = null; ui.mode = 'welcome'; D = {};
+    ui.modal = null; ui.tab = 'rooms'; ui.room = null; ui.friend = null; ui.mode = 'welcome'; D = {};
     toast('Account deleted. You can sign up again anytime.');
   } catch (e) { if (auth.currentUser) startSession(auth.currentUser); throw e; }
   finally { ui.deleting = false; }
@@ -456,7 +465,32 @@ function billCard(r, b) {
     ${isPayer && s.status === 'pending' ? `<button class="sm ghost" data-a="inapp" data-r="${r.id}" data-s="${s.id}">🔔 Remind</button><button class="sm ghost" data-a="accept" data-r="${r.id}" data-s="${s.id}">💵 Got cash</button>` : ''}
     </div></div>`).join('')}</div>`;
 }
+function friendBal(fid) {
+  let n = 0;
+  st.rooms.forEach(r => sharesOf(r.id).forEach(x => { if (x.status === 'confirmed') return; if (x.payer === me() && x.debtor === fid) n += x.amt; if (x.debtor === me() && x.payer === fid) n -= x.amt; }));
+  return n;
+}
+function friendView(fid) {
+  const f = st.friendships.find(q => q.status === 'accepted' && q.members.includes(fid));
+  if (!f) { ui.friend = null; return friendsTab(); }
+  const bal = friendBal(fid);
+  const rooms = st.rooms.filter(r => r.members.includes(fid)).map(r => ({ r, list: sharesOf(r.id).filter(x => x.status !== 'confirmed' && ((x.payer === me() && x.debtor === fid) || (x.payer === fid && x.debtor === me()))) }));
+  const open = rooms.filter(x => x.list.length);
+  const head = bal > 0 ? `<div class="warn" style="margin-top:10px">💰 You will get <b>${rs(bal)}</b> from ${esc(nm(fid))}</div>` : bal < 0 ? `<div class="warn" style="margin-top:10px">You owe <b>${rs(-bal)}</b> to ${esc(nm(fid))}</div>` : `<div class="mut" style="margin-top:10px">✅ All settled with ${esc(nm(fid))}</div>`;
+  return `<div class="row" style="margin-bottom:8px"><button class="ghost sm" data-a="back">‹ Back</button></div>
+  <div class="card"><div class="row"><span class="av">${initial(nm(fid))}</span><div class="grow"><h3>${esc(nm(fid))}</h3><div class="mut">@${esc((U(fid) || {}).username || '')}</div></div></div>
+  <div class="mut" style="margin-top:8px">🤝 Friends since ${f.createdAt ? new Date(ms(f.createdAt)).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'}</div>${head}</div>
+  ${open.map(({ r, list }) => {
+    const get = list.filter(x => x.payer === me()), owe = list.filter(x => x.debtor === me());
+    const g = get.reduce((a, x) => a + x.amt, 0), o = owe.reduce((a, x) => a + x.amt, 0);
+    return `<div class="card"><div class="row sp"><h3>🏠 ${esc(r.name)}</h3><span class="mut" data-a="openroom" data-r="${r.id}" style="cursor:pointer">Open ›</span></div>
+    ${get.length ? `<div class="row sp" style="margin-top:6px"><span>${esc(nm(fid))} owes you</span><b>${rs(g)}</b></div>${get.map(x => `<div class="mut">• ${esc(x.title)} – ${rs(x.amt)} ${x.status === 'claimed' ? '(says paid, confirm in room)' : ''}</div>`).join('')}
+    ${get.some(x => x.status === 'pending') ? `<button class="full" style="margin-top:8px" data-a="remindfr" data-r="${r.id}" data-u="${fid}">🔔 Send reminder</button>` : ''}` : ''}
+    ${owe.length ? `<div class="row sp" style="margin-top:6px"><span>You owe ${esc(nm(fid))}</span><b>${rs(o)}</b></div>${owe.map(x => `<div class="row sp" style="margin-top:4px"><span class="mut">• ${esc(x.title)} – ${rs(x.amt)}</span>${x.status === 'pending' ? `<button class="sm" data-a="pay" data-r="${r.id}" data-s="${x.id}">💸 Pay</button>` : '<span class="mut">waiting…</span>'}</div>`).join('')}` : ''}</div>`;
+  }).join('') || '<div class="empty">No pending payments with this friend.</div>'}`;
+}
 function friendsTab() {
+  if (ui.friend) return friendView(ui.friend);
   const inc = st.friendships.filter(f => f.status === 'pending' && f.requester !== me()), out = st.friendships.filter(f => f.status === 'pending' && f.requester === me());
   const fr = friendIds();
   const other = f => f.members.find(m => m !== me());
@@ -467,7 +501,7 @@ function friendsTab() {
   <button class="sec full" style="margin-top:8px" data-a="modal" data-x="share">📤 Invite to the app</button></div>
   ${inc.map(f => `<div class="card row"><span class="av">${initial(nm(other(f)))}</span><div class="grow"><b>${esc(nm(other(f)))}</b><div class="mut">wants to be your friend</div></div><button class="ok sm" data-a="acceptfr" data-f="${f.id}">Accept</button><button class="ghost sm" data-a="declinefr" data-f="${f.id}">✕</button></div>`).join('')}
   ${out.map(f => `<div class="card row"><span class="av">${initial(nm(other(f)))}</span><div class="grow"><b>${esc(nm(other(f)))}</b><div class="mut">request sent</div></div><button class="ghost sm" data-a="declinefr" data-f="${f.id}">Cancel</button></div>`).join('')}
-  ${fr.length ? fr.map(id => `<div class="card row"><span class="av">${initial(nm(id))}</span><div class="grow"><b>${esc(nm(id))}</b><div class="mut">@${esc((U(id) || {}).username || '')}</div></div></div>`).join('') : '<div class="empty">No friends yet. Add one above.</div>'}`;
+  ${fr.length ? fr.map(id => { const b = friendBal(id); return `<div class="card row" data-a="openfriend" data-u="${id}" style="cursor:pointer"><span class="av">${initial(nm(id))}</span><div class="grow"><b>${esc(nm(id))}</b><div class="mut">@${esc((U(id) || {}).username || '')}</div></div>${b > 0 ? `<span class="chip c-in">gets ${rs(b)}</span>` : b < 0 ? `<span class="chip">owes ${rs(-b)}</span>` : ''}<span class="mut">›</span></div>`; }).join('') : '<div class="empty">No friends yet. Add one above.</div>'}`;
 }
 function actionItems() {
   const items = [];
@@ -571,7 +605,7 @@ function appView() {
 
 /* Back button: Android/browser back goes one level up instead of leaving the app */
 let histDepth = 0, skipPops = 0;
-const navDepth = () => st.user ? ((ui.tab !== 'rooms' ? 1 : 0) + (ui.room ? 1 : 0) + (ui.modal ? 1 : 0)) : (ui.mode === 'mobile' ? 1 : 0);
+const navDepth = () => st.user ? ((ui.tab !== 'rooms' ? 1 : 0) + (ui.friend ? 1 : 0) + (ui.room ? 1 : 0) + (ui.modal ? 1 : 0)) : (ui.mode === 'mobile' ? 1 : 0);
 function syncHistory() {
   const d = navDepth();
   while (histDepth < d) { try { history.pushState({ bb: histDepth + 1 }, ''); } catch (e) { break; } histDepth++; }
@@ -582,6 +616,7 @@ window.addEventListener('popstate', () => {
   histDepth = Math.max(0, histDepth - 1);
   if (!st.user) { if (ui.mode === 'mobile') ui.mode = 'welcome'; }
   else if (ui.modal) ui.modal = null;
+  else if (ui.friend) ui.friend = null;
   else if (ui.room) ui.room = null;
   else if (ui.tab !== 'rooms') ui.tab = 'rooms';
   render();
@@ -623,12 +658,14 @@ document.addEventListener('click', e => {
     case 'emode': ui.emode = x; return render();
     case 'mobilego': return run(mobileGo);
     case 'changepw': return run(changePassword);
-    case 'logout': return run(async () => { await signOut(auth); ui.mode = 'welcome'; ui.tab = 'rooms'; ui.room = null; ui.modal = null; D = {}; });
+    case 'logout': return run(async () => { await signOut(auth); ui.mode = 'welcome'; ui.tab = 'rooms'; ui.room = null; ui.friend = null; ui.modal = null; D = {}; });
     case 'saveprofile': return run(createProfile);
-    case 'tab': ui.tab = x; ui.room = null; ui.fmsg = ''; render(); if (x === 'alerts') markInboxRead().catch(() => {}); return;
+    case 'tab': ui.tab = x; ui.room = null; ui.friend = null; ui.fmsg = ''; render(); if (x === 'alerts') markInboxRead().catch(() => {}); return;
     case 'sub': ui.sub = x; return render();
-    case 'openroom': ui.room = r; return render();
-    case 'back': ui.room = null; return render();
+    case 'openroom': ui.tab = 'rooms'; ui.friend = null; ui.room = r; return render();
+    case 'back': if (ui.friend) ui.friend = null; else ui.room = null; return render();
+    case 'openfriend': ui.friend = u; return render();
+    case 'remindfr': return run(() => remindFriendRoom(r, u));
     case 'modal': D = x === 'bill' ? { mode: 'eq' } : {}; ui.modal = { t: x, r, s }; return render();
     case 'close': ui.modal = null; return render();
     case 'mode': D.mode = x; return render();
