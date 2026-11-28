@@ -535,7 +535,7 @@ function profileTab() {
   <div><label>🌗 Display mode</label><div class="tabs" style="margin:4px 0 0">${[['auto', '🌓 Auto'], ['light', '☀️ Light'], ['dark', '🌙 Dark']].map(m => `<button class="${mode === m[0] ? '' : 'sec'}" data-a="dmode" data-x="${m[0]}">${m[1]}</button>`).join('')}</div></div>
   <div><label>🎨 Colour theme</label><div class="themes">${THEMES.map(t => `<button class="${theme === t[0] ? 'on' : ''}" data-a="theme" data-x="${t[0]}" title="${t[1]}" style="background:linear-gradient(135deg,${t[2]},${t[3]})"></button>`).join('')}</div></div>
   <button class="sec full" data-a="modal" data-x="share">📤 Share app</button>
-  <button class="ghost full" data-a="logout">Log out</button>
+  <button class="ghost full" data-a="modal" data-x="logout">Log out</button>
   <button class="ghost full bad" data-a="modal" data-x="delacct">🗑 Delete my account</button></div>`;
 }
 function inviteText() {
@@ -582,6 +582,8 @@ function modalView() {
   } else if (m.t === 'delroom') {
     const r = st.rooms.find(x => x.id === ui.room); if (!r) return '';
     h = `<h3>Delete “${esc(r.name)}”?</h3><p class="mut">This removes the room, all its bills and history for everyone. It cannot be undone. A room can only be deleted when no payment is pending.</p><button class="bd full" data-a="delroomgo" data-r="${r.id}">Yes, delete room</button>`;
+  } else if (m.t === 'logout') {
+    h = `<h3>Log out?</h3><p class="mut">You will need your password (or Google) to sign in again. Remember your password – it cannot be reset.</p><div class="row"><button class="ghost grow" data-a="close">Cancel</button><button class="bd grow" data-a="logout">Yes, log out</button></div>`;
   } else if (m.t === 'password') {
     h = `<h3>Change password</h3><label>New password</label>${inp('newpw', '••••••', 'password')}<label>Confirm new password</label>${inp('newpw2', '••••••', 'password')}<button class="full" data-a="changepw">Save password</button>`;
   } else if (m.t === 'share') {
@@ -658,7 +660,7 @@ document.addEventListener('click', e => {
     case 'emode': ui.emode = x; return render();
     case 'mobilego': return run(mobileGo);
     case 'changepw': return run(changePassword);
-    case 'logout': return run(async () => { await signOut(auth); ui.mode = 'welcome'; ui.tab = 'rooms'; ui.room = null; ui.friend = null; ui.modal = null; D = {}; });
+    case 'logout': if (!ui.modal && !confirm('Log out of BillBhai?')) return; return run(async () => { await signOut(auth); ui.mode = 'welcome'; ui.tab = 'rooms'; ui.room = null; ui.friend = null; ui.modal = null; D = {}; });
     case 'saveprofile': return run(createProfile);
     case 'tab': ui.tab = x; ui.room = null; ui.friend = null; ui.fmsg = ''; render(); if (x === 'alerts') markInboxRead().catch(() => {}); return;
     case 'sub': ui.sub = x; return render();
